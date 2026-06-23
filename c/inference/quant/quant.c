@@ -3,19 +3,16 @@
 
 #include <stdlib.h>
 #include <math.h>
-#include "quant.h"
-
-// group size global for quantization of the weights.
-// set by the quantized backend's read_checkpoint() from the checkpoint header.
-int GS = 0;
+#include "inference/quant/quant.h"
 
 void dequantize(QuantizedTensor *qx, float* x, int n) {
     for (int i = 0; i < n; i++) {
-        x[i] = qx->q[i] * qx->s[i / GS];
+        x[i] = qx->q[i] * qx->s[i / qx->gs];
     }
 }
 
 void quantize(QuantizedTensor *qx, float* x, int n) {
+    int GS = qx->gs;
     int num_groups = n / GS;
     float Q_MAX = 127.0f;
 
@@ -43,8 +40,9 @@ void quantize(QuantizedTensor *qx, float* x, int n) {
     }
 }
 
-/* initialize `n` x quantized tensor (with `size_each` elements), starting from memory pointed at *ptr */
-QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) {
+/* initialize `n` x quantized tensor (with `size_each` elements, group size `gs`),
+ * starting from memory pointed at *ptr */
+QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each, int gs) {
     void *p = *ptr;
     QuantizedTensor *res = malloc(n * sizeof(QuantizedTensor));
     for(int i=0; i<n; i++) {
@@ -53,7 +51,8 @@ QuantizedTensor *init_quantized_tensors(void **ptr, int n, int size_each) {
         p = (int8_t*)p + size_each;
         /* map scale factors */
         res[i].s = (float*)p;
-        p = (float*)p + size_each / GS;
+        p = (float*)p + size_each / gs;
+        res[i].gs = gs;
     }
     *ptr = p; // advance ptr to current position
     return res;

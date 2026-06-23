@@ -10,14 +10,14 @@
 #include <math.h>
 #include <fcntl.h>
 #if defined _WIN32
-    #include "win.h"
+    #include "platform/win/win.h"
 #else
     #include <unistd.h>
     #include <sys/mman.h>
 #endif
-#include "transformer.h"
-#include "net.h"     // rmsnorm, softmax
-#include "quant.h"   // QuantizedTensor, quantize/dequantize/init_quantized_tensors, GS
+#include "model/transformer/transformer.h"
+#include "core/net/net.h"     // rmsnorm, softmax
+#include "inference/quant/quant.h"   // QuantizedTensor, quantize/dequantize/init_quantized_tensors
 
 // ----------------------------------------------------------------------------
 // quantized Transformer model (definitions private to this backend)
@@ -64,7 +64,15 @@ struct RunState {
     float* value_cache; // (layer, seq_len, dim)
 };
 
-void malloc_run_state(RunState* s, Config* p) {
+// memory-mapping bookkeeping for the checkpoint file (private to this backend;
+// held opaquely by the shared Transformer handle)
+struct TransformerMmap {
+    int fd;            // file descriptor for the memory mapping
+    float* data;       // memory mapped data pointer
+    ssize_t file_size; // size of the checkpoint file in bytes
+};
+
+void malloc_run_state(RunState* s, Config* p, int gs) {
     // we calloc instead of malloc to keep valgrind happy
     int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     s->x = calloc(p->dim, sizeof(float));
@@ -72,8 +80,8 @@ void malloc_run_state(RunState* s, Config* p) {
     s->xb2 = calloc(p->dim, sizeof(float));
     s->hb = calloc(p->hidden_dim, sizeof(float));
     s->hb2 = calloc(p->hidden_dim, sizeof(float));
-    s->xq = (QuantizedTensor) { .q = calloc(p->dim, sizeof(int8_t)), .s = calloc(p->dim, sizeof(float)) };
-    s->hq = (QuantizedTensor) { .q = calloc(p->hidden_dim, sizeof(int8_t)), .s = calloc(p->hidden_dim, sizeof(float)) };
+    s->xq = (QuantizedTensor) { .q = calloc(p->dim, sizeof(int8_t)), .s = calloc(p->dim, sizeof(float)), .gs = gs };
+    s->hq = (QuantizedTensor) { .q = calloc(p->hidden_dim, sizeof(int8_t)), .s = calloc(p->hidden_dim, sizeof(float)), .gs = gs };
     s->q = calloc(p->dim, sizeof(float));
     s->k = calloc(kv_dim, sizeof(float));
     s->v = calloc(kv_dim, sizeof(float));
@@ -109,7 +117,7 @@ void free_run_state(RunState* s) {
     free(s->value_cache);
 }
 
-void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t shared_classifier) {
+void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t shared_classifier, int gs) {
     int head_size = p->dim / p->n_heads;
     // first are the parameters that are kept in fp32 (the rmsnorm (1D) weights)
     float* fptr = (float*) ptr; // cast our pointer to float*
@@ -122,25 +130,25 @@ void memory_map_weights(TransformerWeights *w, Config* p, void* ptr, uint8_t sha
 
     // now read all the quantized weights
     ptr = (void*)fptr; // now cast the pointer back to void*
-    w->q_tokens = init_quantized_tensors(&ptr, 1, p->vocab_size * p->dim);
+    w->q_tokens = init_quantized_tensors(&ptr, 1, p->vocab_size * p->dim, gs);
     // dequantize token embedding table
     w->token_embedding_table = malloc(p->vocab_size * p->dim * sizeof(float));
     dequantize(w->q_tokens, w->token_embedding_table, p->vocab_size * p->dim);
 
-    w->wq = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_heads * head_size));
-    w->wk = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size));
-    w->wv = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size));
-    w->wo = init_quantized_tensors(&ptr, p->n_layers, (p->n_heads * head_size) * p->dim);
+    w->wq = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_heads * head_size), gs);
+    w->wk = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size), gs);
+    w->wv = init_quantized_tensors(&ptr, p->n_layers, p->dim * (p->n_kv_heads * head_size), gs);
+    w->wo = init_quantized_tensors(&ptr, p->n_layers, (p->n_heads * head_size) * p->dim, gs);
 
-    w->w1 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim);
-    w->w2 = init_quantized_tensors(&ptr, p->n_layers, p->hidden_dim * p->dim);
-    w->w3 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim);
+    w->w1 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim, gs);
+    w->w2 = init_quantized_tensors(&ptr, p->n_layers, p->hidden_dim * p->dim, gs);
+    w->w3 = init_quantized_tensors(&ptr, p->n_layers, p->dim * p->hidden_dim, gs);
 
-    w->wcls = shared_classifier ? w->q_tokens : init_quantized_tensors(&ptr, 1, p->dim * p->vocab_size);
+    w->wcls = shared_classifier ? w->q_tokens : init_quantized_tensors(&ptr, 1, p->dim * p->vocab_size, gs);
 }
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
-                     int* fd, float** data, ssize_t* file_size) {
+                     TransformerMmap *mm, int *group_size_out) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
     // read in magic number (uint32), has to be 0x616b3432, i.e. "ak42" in ASCII
@@ -159,30 +167,36 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     if (fread(&shared_classifier, sizeof(uint8_t), 1, file) != 1) { exit(EXIT_FAILURE); }
     int group_size; // the group size used in quantization
     if (fread(&group_size, sizeof(int), 1, file) != 1) { exit(EXIT_FAILURE); }
-    GS = group_size; // set as global, as it will be used in many places
+    *group_size_out = group_size; // returned so the caller can thread it through
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
-    *file_size = ftell(file); // get the file size, in bytes
+    mm->file_size = ftell(file); // get the file size, in bytes
     fclose(file);
     // memory map the Transformer weights into the data pointer
-    *fd = open(checkpoint, O_RDONLY); // open in read only mode
-    if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    void* weights_ptr = ((char*)*data) + header_size; // skip header bytes. char is 1 byte
-    memory_map_weights(weights, config, weights_ptr, shared_classifier);
+    mm->fd = open(checkpoint, O_RDONLY); // open in read only mode
+    if (mm->fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+    mm->data = mmap(NULL, mm->file_size, PROT_READ, MAP_PRIVATE, mm->fd, 0);
+    if (mm->data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
+    void* weights_ptr = ((char*)mm->data) + header_size; // skip header bytes. char is 1 byte
+    memory_map_weights(weights, config, weights_ptr, shared_classifier, group_size);
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
-    // heap-allocate the backend-specific weights and run state (held opaquely
-    // by the shared Transformer handle)
+    // heap-allocate the backend-specific weights, run state, and mmap handle
+    // (all held opaquely by the shared Transformer handle)
     t->weights = malloc(sizeof(TransformerWeights));
     t->state = malloc(sizeof(RunState));
-    if (!t->weights || !t->state) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    t->mmap = malloc(sizeof(TransformerMmap));
+    if (!t->weights || !t->state || !t->mmap) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    // initialize the mmap handle so free_transformer is safe even on partial init
+    t->mmap->fd = -1;
+    t->mmap->data = MAP_FAILED;
+    t->mmap->file_size = 0;
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, t->weights, &t->fd, &t->data, &t->file_size);
-    // allocate the RunState buffers
-    malloc_run_state(t->state, &t->config);
+    int group_size;
+    read_checkpoint(checkpoint_path, &t->config, t->weights, t->mmap, &group_size);
+    // allocate the RunState buffers (group_size threads the quant group size onto xq/hq)
+    malloc_run_state(t->state, &t->config, group_size);
 }
 
 void free_transformer(Transformer* t) {
@@ -198,8 +212,9 @@ void free_transformer(Transformer* t) {
     free(t->weights->w3);
     if(t->weights->wcls != t->weights->q_tokens) { free(t->weights->wcls); }
     // close the memory mapping
-    if (t->data != MAP_FAILED) { munmap(t->data, t->file_size); }
-    if (t->fd != -1) { close(t->fd); }
+    if (t->mmap->data != MAP_FAILED) { munmap(t->mmap->data, t->mmap->file_size); }
+    if (t->mmap->fd != -1) { close(t->mmap->fd); }
+    free(t->mmap);
     // free the RunState buffers and the backend structs
     free_run_state(t->state);
     free(t->state);
@@ -213,6 +228,7 @@ void free_transformer(Transformer* t) {
 // by far the most amount of time is spent inside this little function
 // inputs to this function are both quantized
 static void matmul(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
+    const int GS = w->gs; // group size carried on each quantized tensor (x->gs == w->gs)
     int i;
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++) {

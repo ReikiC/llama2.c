@@ -2,9 +2,9 @@
 #define APP_H
 
 #include <stddef.h> // size_t
-#include "transformer.h"
-#include "tokenizer.h"
-#include "sampler.h"
+#include "model/transformer/transformer.h"
+#include "inference/tokenizer/tokenizer.h"
+#include "inference/sampler/sampler.h"
 
 // ----------------------------------------------------------------------------
 // The application loops that drive a Transformer+Tokenizer+Sampler.

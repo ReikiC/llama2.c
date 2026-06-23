@@ -1,11 +1,12 @@
-/* Tokenizer encoding tests. Links against c/src/tokenizer.c only (see `make
- * testcc`); no longer #includes run.c, so the old #ifndef TESTING guard is
- * gone — main() lives in c/src/main.c, which this test simply does not link. */
+/* Tokenizer encoding tests. Links against c/inference/tokenizer/tokenizer.c
+ * only (see `make testcc`); no longer #includes run.c, so the old #ifndef
+ * TESTING guard is gone — main() lives in c/app/main.c, which this test
+ * simply does not link. */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "tokenizer.h"
+#include "inference/tokenizer/tokenizer.h"
 
 void assert_eq(int a, int b) {
     if (a != b) {

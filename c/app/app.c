@@ -5,8 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "app.h"
-#include "utils.h"
+#include "app/app.h"
+#include "core/utils/utils.h"
 
 // ----------------------------------------------------------------------------
 // generation loop

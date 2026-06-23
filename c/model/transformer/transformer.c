@@ -8,13 +8,13 @@
 #include <math.h>
 #include <fcntl.h>
 #if defined _WIN32
-    #include "win.h"
+    #include "platform/win/win.h"
 #else
     #include <unistd.h>
     #include <sys/mman.h>
 #endif
-#include "transformer.h"
-#include "net.h" // rmsnorm, softmax
+#include "model/transformer/transformer.h"
+#include "core/net/net.h" // rmsnorm, softmax
 
 // ----------------------------------------------------------------------------
 // fp32 Transformer model (definitions private to this backend)
@@ -55,6 +55,14 @@ struct RunState {
     // kv cache
     float* key_cache;   // (layer, seq_len, dim)
     float* value_cache; // (layer, seq_len, dim)
+};
+
+// memory-mapping bookkeeping for the checkpoint file (private to this backend;
+// held opaquely by the shared Transformer handle)
+struct TransformerMmap {
+    int fd;            // file descriptor for the memory mapping
+    float* data;       // memory mapped data pointer
+    ssize_t file_size; // size of the checkpoint file in bytes
 };
 
 void malloc_run_state(RunState* s, Config* p) {
@@ -123,7 +131,7 @@ void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared
 }
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
-                     int* fd, float** data, ssize_t* file_size) {
+                     TransformerMmap *mm) {
     FILE *file = fopen(checkpoint, "rb");
     if (!file) { fprintf(stderr, "Couldn't open file %s\n", checkpoint); exit(EXIT_FAILURE); }
     // read in the config header
@@ -133,33 +141,39 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     config->vocab_size = abs(config->vocab_size);
     // figure out the file size
     fseek(file, 0, SEEK_END); // move file pointer to end of file
-    *file_size = ftell(file); // get the file size, in bytes
+    mm->file_size = ftell(file); // get the file size, in bytes
     fclose(file);
     // memory map the Transformer weights into the data pointer
-    *fd = open(checkpoint, O_RDONLY); // open in read only mode
-    if (*fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
-    *data = mmap(NULL, *file_size, PROT_READ, MAP_PRIVATE, *fd, 0);
-    if (*data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
-    float* weights_ptr = *data + sizeof(Config)/sizeof(float);
+    mm->fd = open(checkpoint, O_RDONLY); // open in read only mode
+    if (mm->fd == -1) { fprintf(stderr, "open failed!\n"); exit(EXIT_FAILURE); }
+    mm->data = mmap(NULL, mm->file_size, PROT_READ, MAP_PRIVATE, mm->fd, 0);
+    if (mm->data == MAP_FAILED) { fprintf(stderr, "mmap failed!\n"); exit(EXIT_FAILURE); }
+    float* weights_ptr = mm->data + sizeof(Config)/sizeof(float);
     memory_map_weights(weights, config, weights_ptr, shared_weights);
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
-    // heap-allocate the backend-specific weights and run state (held opaquely
-    // by the shared Transformer handle)
+    // heap-allocate the backend-specific weights, run state, and mmap handle
+    // (all held opaquely by the shared Transformer handle)
     t->weights = malloc(sizeof(TransformerWeights));
     t->state = malloc(sizeof(RunState));
-    if (!t->weights || !t->state) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    t->mmap = malloc(sizeof(TransformerMmap));
+    if (!t->weights || !t->state || !t->mmap) { fprintf(stderr, "malloc failed!\n"); exit(EXIT_FAILURE); }
+    // initialize the mmap handle so free_transformer is safe even on partial init
+    t->mmap->fd = -1;
+    t->mmap->data = MAP_FAILED;
+    t->mmap->file_size = 0;
     // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, t->weights, &t->fd, &t->data, &t->file_size);
+    read_checkpoint(checkpoint_path, &t->config, t->weights, t->mmap);
     // allocate the RunState buffers
     malloc_run_state(t->state, &t->config);
 }
 
 void free_transformer(Transformer* t) {
     // close the memory mapping
-    if (t->data != MAP_FAILED) { munmap(t->data, t->file_size); }
-    if (t->fd != -1) { close(t->fd); }
+    if (t->mmap->data != MAP_FAILED) { munmap(t->mmap->data, t->mmap->file_size); }
+    if (t->mmap->fd != -1) { close(t->mmap->fd); }
+    free(t->mmap);
     // free the RunState buffers and the backend structs
     free_run_state(t->state);
     free(t->state);

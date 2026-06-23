@@ -13,9 +13,16 @@ As the architecture is identical, you can also load and inference Meta's Llama 2
 ## repo layout
 
 ```
-c/        pure-C inference engine — a shared layer (net, tokenizer, sampler, utils, app, main)
-          plus two selectable backends: fp32 (transformer.c -> `run`) and
-          int8-quantized (transformer_q.c + quant.c -> `runq`). See c/include for the API.
+c/        pure-C inference engine, organized in architectural layers. Each module
+          is a folder holding its own .h + .c together, and dependencies point
+          strictly downward (app -> model/inference/core/platform):
+          core/       foundation, no internal deps (config, net, utils)
+          platform/   platform shims (win — mmap/clock_gettime for Windows)
+          inference/  inference support (tokenizer, sampler, quant)
+          model/      the model + two selectable backends:
+                      fp32 (transformer.c -> `run`) and
+                      int8-quantized (transformer_q.c + quant.c -> `runq`)
+          app/        top-level orchestration + CLI entry (app, main)
 python/   PyTorch reference: training (train.py), export to .bin (export.py), sampling (sample.py), model.py, ...
 tests/    C tokenizer tests (test.c) and pytest end-to-end tests (test_all.py)
 tokenizer/  committed Llama 2 tokenizer (tokenizer.bin, tokenizer.model)
@@ -129,9 +136,9 @@ uv run python python/tokenizer.py --tokenizer-model=/path/to/CodeLlama-7b-Instru
 
 ## int8 quantization
 
-The default fp32 backend ([`c/src/transformer.c`](c/src/transformer.c)), above, uses a float32 forward pass, where the entire calculation of the forward pass is kept in fp32. This is very easy to understand as far as reference code goes, but it has the following downsides: the model checkpoint files are very large (it takes 4 bytes per every individual weight), and the forward pass is relatively slow. The (very) common inference optimization employed in practice is to quantize the model parameters to lower precision, giving up a little bit of correctness in return for smaller checkpoint sizes and faster forward passes (as most of the inference uses integer arithmetic). Empirically, LLMs can tolerate precisions as low as 4-bit (or even lower), but we use int8 here because it is a "safe" setting that gets us the benefits but doesn't sacrifice too much of the model accuracy. Only the weights that participate in matmuls are quantized. All the other parameters (e.g. especially the scale and bias in RMSNorm) are kept in float32, because these layers are very sensitive. Now, if all you're after is reduction in checkpoint sizes, you could quantize the weights, save the checkpoint, and then dequantize them in the C engine, and do float32 inference as normal and call it a day. This is totally fine. But here, we go one step further (as is standard practice) and additionally quantize the activations in the forward pass. This requires us to dynamically quantize and dequantize between float32 and int8 at runtime, which adds overhead. But the benefit is that now the majority of the calculations (the matmuls especially!) are using pure integer arithmetic, where both weights and activations enter as int8. This is where the speedups can fundamentally come from. The version we use is the "Q8_0" quantization (llama.cpp terminology), where the 0 means that the weight quantization is symmetric around 0, quantizing to the range [-127, 127].
+The default fp32 backend ([`c/model/transformer/transformer.c`](c/model/transformer/transformer.c)), above, uses a float32 forward pass, where the entire calculation of the forward pass is kept in fp32. This is very easy to understand as far as reference code goes, but it has the following downsides: the model checkpoint files are very large (it takes 4 bytes per every individual weight), and the forward pass is relatively slow. The (very) common inference optimization employed in practice is to quantize the model parameters to lower precision, giving up a little bit of correctness in return for smaller checkpoint sizes and faster forward passes (as most of the inference uses integer arithmetic). Empirically, LLMs can tolerate precisions as low as 4-bit (or even lower), but we use int8 here because it is a "safe" setting that gets us the benefits but doesn't sacrifice too much of the model accuracy. Only the weights that participate in matmuls are quantized. All the other parameters (e.g. especially the scale and bias in RMSNorm) are kept in float32, because these layers are very sensitive. Now, if all you're after is reduction in checkpoint sizes, you could quantize the weights, save the checkpoint, and then dequantize them in the C engine, and do float32 inference as normal and call it a day. This is totally fine. But here, we go one step further (as is standard practice) and additionally quantize the activations in the forward pass. This requires us to dynamically quantize and dequantize between float32 and int8 at runtime, which adds overhead. But the benefit is that now the majority of the calculations (the matmuls especially!) are using pure integer arithmetic, where both weights and activations enter as int8. This is where the speedups can fundamentally come from. The version we use is the "Q8_0" quantization (llama.cpp terminology), where the 0 means that the weight quantization is symmetric around 0, quantizing to the range [-127, 127].
 
-The quantized forward pass is implemented in [`c/src/transformer_q.c`](c/src/transformer_q.c) (with the int8 helpers in [`c/src/quant.c`](c/src/quant.c)). To use it, we have to export the model in the quantized format. For example, the float32 version of Llama 2 7B was exported as:
+The quantized forward pass is implemented in [`c/model/transformer/transformer_q.c`](c/model/transformer/transformer_q.c) (with the int8 helpers in [`c/inference/quant/quant.c`](c/inference/quant/quant.c)). To use it, we have to export the model in the quantized format. For example, the float32 version of Llama 2 7B was exported as:
 
 ```
 uv run python python/export.py llama2_7b.bin --meta-llama path/to/llama/model/7B
@@ -262,7 +269,7 @@ This should print the samples. If you leave out the `-z` flag, it will use the d
 There are many ways to potentially speed up this code depending on your system. Have a look at the [Makefile](Makefile), which contains a lot of notes. The `make run` command currently uses the `-O3` optimization by default, i.e.:
 
 ```bash
-gcc -O3 -Ic/include -o build/run c/src/transformer.c c/src/{net,tokenizer,sampler,utils,app,main}.c -lm
+gcc -O3 -Ic -o build/run c/model/transformer/transformer.c c/core/net/net.c c/inference/tokenizer/tokenizer.c c/inference/sampler/sampler.c c/core/utils/utils.c c/app/app.c c/app/main.c -lm
 ```
 
 -O3 includes optimizations that are expensive in terms of compile time and memory usage. Including vectorization, loop unrolling, and predicting branches.
@@ -281,7 +288,7 @@ If compiling with gcc, try experimenting with `-funroll-all-loops`, see PR [#183
 You'll need to install the OpenMP library and the clang compiler first (e.g. `apt install clang libomp-dev` on ubuntu). Then you can compile with `make runomp`, which does:
 
 ```bash
-clang -Ofast -fopenmp -march=native -Ic/include c/src/transformer.c c/src/{net,tokenizer,sampler,utils,app,main}.c -lm -o build/run
+clang -Ofast -fopenmp -march=native -Ic c/model/transformer/transformer.c c/core/net/net.c c/inference/tokenizer/tokenizer.c c/inference/sampler/sampler.c c/core/utils/utils.c c/app/app.c c/app/main.c -lm -o build/run
 ```
 
 When you run inference make sure to use OpenMP flags to set the number of threads, e.g.:

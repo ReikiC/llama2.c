@@ -1,7 +1,7 @@
 /* Shared neural-net building blocks: rmsnorm and softmax. */
 
 #include <math.h>
-#include "net.h"
+#include "core/net/net.h"
 
 void rmsnorm(float* o, float* x, float* weight, int size) {
     // calculate sum of squares

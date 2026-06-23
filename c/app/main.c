@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "transformer.h"
-#include "tokenizer.h"
-#include "sampler.h"
-#include "app.h"
+#include "model/transformer/transformer.h"
+#include "inference/tokenizer/tokenizer.h"
+#include "inference/sampler/sampler.h"
+#include "app/app.h"
 
 void error_usage() {
     fprintf(stderr, "Usage:   run <checkpoint> [options]\n");

@@ -2,9 +2,9 @@
 
 #include <time.h>
 #if defined _WIN32
-    #include "win.h" // clock_gettime shim
+    #include "platform/win/win.h" // clock_gettime shim
 #endif
-#include "utils.h"
+#include "core/utils/utils.h"
 
 long time_in_ms() {
     // return time in milliseconds, for benchmarking the model speed

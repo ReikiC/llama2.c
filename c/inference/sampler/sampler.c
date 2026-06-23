@@ -3,8 +3,8 @@
  * Shared by the fp32 and quantized backends. */
 
 #include <stdlib.h>
-#include "sampler.h"
-#include "net.h" // softmax
+#include "inference/sampler/sampler.h"
+#include "core/net/net.h" // softmax
 
 // return the index that has the highest probability
 static int sample_argmax(float* probabilities, int n) {
