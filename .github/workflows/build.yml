@@ -173,8 +173,13 @@ jobs:
         with:
           enable-cache: true
 
+      # run uv/pytest in Git Bash, not the job-default msys2 shell:
+      # setup-uv puts uv on the Windows PATH, which Git Bash inherits but
+      # msys2 does not (it would fail with "uv: command not found").
       - name: Install Python dependencies
+        shell: bash
         run: uv sync --frozen
 
       - name: Test with pytest
+        shell: bash
         run: uv run pytest
