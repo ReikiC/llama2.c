@@ -1,0 +1,27 @@
+[project]
+name = "llama2.c"
+version = "0.1.0"
+description = "Inference Llama 2 model in one file of pure C, plus the PyTorch training/export reference."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "sentencepiece",
+    "tqdm",
+    "requests",
+    "wandb",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+# The C repo is not an installable Python package; uv just manages the
+# environment the scripts in python/ run in.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
+testpaths = ["tests"]

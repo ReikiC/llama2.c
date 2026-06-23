@@ -6,7 +6,10 @@ import os
 import pytest # pip install pytest
 import requests
 import subprocess
+import sys
 
+# the model/tokenizer modules now live in ../python; make them importable from tests/
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 import torch
 from model import ModelArgs, Transformer
@@ -14,8 +17,10 @@ from tokenizer import Tokenizer
 
 # -----------------------------------------------------------------------------
 # test utilities
-
-test_ckpt_dir = "test"
+# all generated scratch (downloaded fixtures, captured stdout/err, the C binary)
+# lives under build/ so the repo root stays clean.
+BUILD_DIR = "build"
+test_ckpt_dir = os.path.join(BUILD_DIR, "test")
 
 def download_file(url, filename):
     print(f"Downloading {url} to {filename}")
@@ -46,13 +51,14 @@ def test_runc():
 
     model_path = os.path.join(test_ckpt_dir, "stories260K.bin")
     tokenizer_path = os.path.join(test_ckpt_dir, "tok512.bin")
-    command = ["./run", model_path, "-z", tokenizer_path, "-t", "0.0", "-n", "200"]
-    with open('err.txt', mode='wb') as fe:
-        with open('stdout.txt', mode='wb') as fo:
+    os.makedirs(BUILD_DIR, exist_ok=True)
+    command = [os.path.join(BUILD_DIR, "run"), model_path, "-z", tokenizer_path, "-t", "0.0", "-n", "200"]
+    with open(os.path.join(BUILD_DIR, 'err.txt'), mode='wb') as fe:
+        with open(os.path.join(BUILD_DIR, 'stdout.txt'), mode='wb') as fo:
             proc = subprocess.Popen(command, stdout=fo, stderr=fe)  #pipe in windows terminal does funny things like replacing \n with \r\n
             proc.wait()
 
-    with open('stdout.txt', mode='r') as f:
+    with open(os.path.join(BUILD_DIR, 'stdout.txt'), mode='r') as f:
         stdout = f.read()
     # strip the very last \n that is added by run.c for aesthetic reasons
     stdout = stdout[:-1].encode('ascii')

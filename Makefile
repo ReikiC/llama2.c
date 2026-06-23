@@ -2,17 +2,31 @@
 # example override to clang: make run CC=clang
 CC = gcc
 
+# all build output (binaries, test scratch) goes here so the repo root stays clean.
+# the whole directory is gitignored.
+BUILDDIR = build
+
+# the shared inference sources, compiled into both the fp32 (`run`) and the
+# int8-quantized (`runq`) binaries. Each binary additionally links exactly one
+# backend: c/src/transformer.c (fp32) or c/src/transformer_q.c + c/src/quant.c.
+SHARED = c/src/net.c c/src/tokenizer.c c/src/sampler.c c/src/utils.c c/src/app.c c/src/main.c
+INCLUDES = -Ic/include
+
+# ensure the build directory exists (order-only prerequisite)
+$(BUILDDIR):
+	mkdir -p $(BUILDDIR)
+
 # the most basic way of building that is most likely to work on most systems
 .PHONY: run
-run: run.c
-	$(CC) -O3 -o run run.c -lm
-	$(CC) -O3 -o runq runq.c -lm
+run: | $(BUILDDIR)
+	$(CC) -O3 $(INCLUDES) -o $(BUILDDIR)/run c/src/transformer.c $(SHARED) -lm
+	$(CC) -O3 $(INCLUDES) -o $(BUILDDIR)/runq c/src/transformer_q.c c/src/quant.c $(SHARED) -lm
 
 # useful for a debug build, can then e.g. analyze with valgrind, example:
-# $ valgrind --leak-check=full ./run out/model.bin -n 3
-rundebug: run.c
-	$(CC) -g -o run run.c -lm
-	$(CC) -g -o runq runq.c -lm
+# $ valgrind --leak-check=full ./build/run data/model.bin -n 3
+rundebug: | $(BUILDDIR)
+	$(CC) -g $(INCLUDES) -o $(BUILDDIR)/run c/src/transformer.c $(SHARED) -lm
+	$(CC) -g $(INCLUDES) -o $(BUILDDIR)/runq c/src/transformer_q.c c/src/quant.c $(SHARED) -lm
 
 # https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
 # https://simonbyrne.github.io/notes/fastmath/
@@ -24,53 +38,52 @@ rundebug: run.c
 # It turns off -fsemantic-interposition.
 # In our specific application this is *probably* okay to use
 .PHONY: runfast
-runfast: run.c
-	$(CC) -Ofast -o run run.c -lm
-	$(CC) -Ofast -o runq runq.c -lm
+runfast: | $(BUILDDIR)
+	$(CC) -Ofast $(INCLUDES) -o $(BUILDDIR)/run c/src/transformer.c $(SHARED) -lm
+	$(CC) -Ofast $(INCLUDES) -o $(BUILDDIR)/runq c/src/transformer_q.c c/src/quant.c $(SHARED) -lm
 
 # additionally compiles with OpenMP, allowing multithreaded runs
 # make sure to also enable multiple threads when running, e.g.:
-# OMP_NUM_THREADS=4 ./run out/model.bin
+# OMP_NUM_THREADS=4 ./build/run data/model.bin
 .PHONY: runomp
-runomp: run.c
-	$(CC) -Ofast -fopenmp -march=native run.c  -lm  -o run
-	$(CC) -Ofast -fopenmp -march=native runq.c  -lm  -o runq
+runomp: | $(BUILDDIR)
+	$(CC) -Ofast -fopenmp -march=native $(INCLUDES) c/src/transformer.c $(SHARED) -lm -o $(BUILDDIR)/run
+	$(CC) -Ofast -fopenmp -march=native $(INCLUDES) c/src/transformer_q.c c/src/quant.c $(SHARED) -lm -o $(BUILDDIR)/runq
 
 .PHONY: win64
-win64:
-	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o run.exe -I. run.c win.c
-	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o runq.exe -I. runq.c win.c
+win64: | $(BUILDDIR)
+	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o $(BUILDDIR)/run.exe $(INCLUDES) c/src/transformer.c $(SHARED) c/src/win.c
+	x86_64-w64-mingw32-gcc -Ofast -D_WIN32 -o $(BUILDDIR)/runq.exe $(INCLUDES) c/src/transformer_q.c c/src/quant.c $(SHARED) c/src/win.c
 
-# compiles with gnu99 standard flags for amazon linux, coreos, etc. compatibility
+# compiles with gnu11 standard flags for amazon linux, coreos, etc. compatibility
 .PHONY: rungnu
-rungnu:
-	$(CC) -Ofast -std=gnu11 -o run run.c -lm
-	$(CC) -Ofast -std=gnu11 -o runq runq.c -lm
+rungnu: | $(BUILDDIR)
+	$(CC) -Ofast -std=gnu11 $(INCLUDES) -o $(BUILDDIR)/run c/src/transformer.c $(SHARED) -lm
+	$(CC) -Ofast -std=gnu11 $(INCLUDES) -o $(BUILDDIR)/runq c/src/transformer_q.c c/src/quant.c $(SHARED) -lm
 
 .PHONY: runompgnu
-runompgnu:
-	$(CC) -Ofast -fopenmp -std=gnu11 run.c  -lm  -o run
-	$(CC) -Ofast -fopenmp -std=gnu11 runq.c  -lm  -o runq
+runompgnu: | $(BUILDDIR)
+	$(CC) -Ofast -fopenmp -std=gnu11 $(INCLUDES) c/src/transformer.c $(SHARED) -lm -o $(BUILDDIR)/run
+	$(CC) -Ofast -fopenmp -std=gnu11 $(INCLUDES) c/src/transformer_q.c c/src/quant.c $(SHARED) -lm -o $(BUILDDIR)/runq
 
-# run all tests
+# run all tests (Python deps are uv-managed; use `uv sync` first)
 .PHONY: test
 test:
-	pytest
+	uv run pytest
 
-# run only tests for run.c C implementation (is a bit faster if only C code changed)
+# run only tests for the C implementation (is a bit faster if only C code changed)
 .PHONY: testc
 testc:
-	pytest -k runc
+	uv run pytest -k runc
 
-# run the C tests, without touching pytest / python
+# run the C tokenizer tests, without touching pytest / python
 # to increase verbosity level run e.g. as `make testcc VERBOSITY=1`
 VERBOSITY ?= 0
 .PHONY: testcc
-testcc:
-	$(CC) -DVERBOSITY=$(VERBOSITY) -O3 -o testc test.c -lm
-	./testc
+testcc: | $(BUILDDIR)
+	$(CC) -DVERBOSITY=$(VERBOSITY) -O3 $(INCLUDES) -o $(BUILDDIR)/testc tests/test.c c/src/tokenizer.c -lm
+	./$(BUILDDIR)/testc
 
 .PHONY: clean
 clean:
-	rm -f run
-	rm -f runq
+	rm -rf $(BUILDDIR)
