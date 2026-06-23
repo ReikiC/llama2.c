@@ -46,7 +46,7 @@ void test_prompt_encoding(Tokenizer* tokenizer, char* prompt, int* expected_toke
 void test_prompt_encodings() {
     // let's verify that the Tokenizer works as expected
 
-    char *tokenizer_path = "data/tokenizer.bin";
+    char *tokenizer_path = "tokenizer/tokenizer.bin";
     int vocab_size = 32000;
     Tokenizer tokenizer;
     build_tokenizer(&tokenizer, tokenizer_path, vocab_size);

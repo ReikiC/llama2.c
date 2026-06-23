@@ -18,7 +18,8 @@ c/        pure-C inference engine — a shared layer (net, tokenizer, sampler, u
           int8-quantized (transformer_q.c + quant.c -> `runq`). See c/include for the API.
 python/   PyTorch reference: training (train.py), export to .bin (export.py), sampling (sample.py), model.py, ...
 tests/    C tokenizer tests (test.c) and pytest end-to-end tests (test_all.py)
-data/     committed Llama 2 tokenizer (tokenizer.bin, tokenizer.model); models go here too
+tokenizer/  committed Llama 2 tokenizer (tokenizer.bin, tokenizer.model)
+data/       model checkpoints go here (downloaded or trained)
 ```
 
 Python dependencies are managed with [uv](https://docs.astral.sh/uv/) — run `uv sync` once to create the environment, then invoke scripts as `uv run python python/<script>.py` (so you don't install torch etc. globally).
@@ -41,24 +42,24 @@ Then, open the repository folder:
 cd llama2.c
 ```
 
-Now, let's just run a baby Llama 2 model in C. You need a model checkpoint. Download this 15M parameter model I trained on the [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) dataset (~60MB download):
+Now, let's just run a baby Llama 2 model in C. You need a model checkpoint. Download this 15M parameter model I trained on the [TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories) dataset (~60MB download; saved to `data/`, where model checkpoints live):
 
 ```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
+wget -P data https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
 ```
 
 Compile and run the C code:
 
 ```bash
 make run
-./build/run stories15M.bin
+./build/run data/stories15M.bin
 ```
 
 You'll see the text stream a sample. On my M1 MacBook Air this runs at ~110 tokens/s. See [performance](#performance) or the Makefile for compile flags that can significantly speed this up. We can also try a bit bigger 42M parameter model:
 
 ```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin
-./build/run stories42M.bin
+wget -P data https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin
+./build/run data/stories42M.bin
 ```
 
 This still runs at interactive rates and samples more coherent and diverse stories:
@@ -68,7 +69,7 @@ This still runs at interactive rates and samples more coherent and diverse stori
 You can also prompt the model with a prefix or a number of additional command line arguments, e.g. to sample at temperature 0.8 for 256 steps and with a prompt:
 
 ```bash
-./build/run stories42M.bin -t 0.8 -n 256 -i "One day, Lily met a Shoggoth"
+./build/run data/stories42M.bin -t 0.8 -n 256 -i "One day, Lily met a Shoggoth"
 ```
 
 > One day, Lily met a Shoggoth. He was very shy, but was also very generous. Lily said “Hello Shoggy! Can I be your friend?” Shoggy was happy to have a friend and said “Yes, let’s explore the universe together!” So they set off on a journey to explore the universe. As they travelled, Shoggy was happy to explain to Lily about all the wonderful things in the universe. At the end of the day, Lily and Shoggy had gathered lots of wonderful things from the universe, and they both felt very proud. They promised to explore the universe as one big pair and to never stop being generous to each other.
@@ -189,7 +190,7 @@ uv run python python/train.py
 Totally understand if you want to skip model training, for simple demo just download one of the pretrained models (see [models](#models) section), e.g.:
 
 ```bash
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
+wget -P data https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
 ```
 
 Once we have the model.bin file, we can inference in C. Compile the C code first:
@@ -201,7 +202,7 @@ make run
 You can now run it simply as
 
 ```bash
-./build/run stories15M.bin
+./build/run data/stories15M.bin
 ```
 
 Watch the tokens stream by, fun! We can also run the PyTorch inference script for a comparison. Download one of the models again from huggingface hub and point the `python/sample.py` script at it:
