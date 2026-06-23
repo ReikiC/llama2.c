@@ -68,9 +68,19 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 1000  # how many steps to warm up for
 # system
-device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+# pick the best available accelerator: NVIDIA CUDA, Apple Silicon MPS, else CPU.
+# (a configurator.py override set below via exec() still wins.)
+if torch.cuda.is_available():
+    device = "cuda"
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
 dtype = "bfloat16"  # float32|bfloat16|float16
-compile = True  # use PyTorch 2.0 to compile the model to be faster
+# torch.compile speeds up CUDA/CPU but is unreliable on Apple MPS — the inductor
+# graph can emit garbage values (e.g. on newer chips), so default it off there.
+# A configurator.py override (--compile=True) still wins.
+compile = device != "mps"  # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
 config_keys = [
     k
